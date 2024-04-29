@@ -1,9 +1,10 @@
 import pygame
-from sympy import nsolve, solve, symbols, Eq
+from sympy import nsolve, solve, symbols, Eq, diff
 import sympy
 from math import sin, cos, pi, sqrt, copysign
 import random
 import numpy as np
+import multiprocessing as mp
 
 def shift(points, displacement=(0,0,0)):
     output = []
@@ -115,8 +116,8 @@ class Camera:
         #o[i] + alpha*x[i] + beta*y[i] = p[i] + gamma*f[i] - gamma*p[i]
         #o[i] + alpha*x[i] + beta*y[i] = p[i] + (f[i]-p[i])*gamma
         #x[i]*alpha + y[i]*beta + (p[i]-f[i])*gamma = p[i] - o[i]
-        a = np.array([[x[i], y[i], p[i]-f[i]] for i in range(3)])
-        b = np.array([p[i]-o[i] for i in range(3)])
+        a = np.array([[x[i], y[i], p[i]-f[i]] for i in range(3)], dtype=np.float64)
+        b = np.array([p[i]-o[i] for i in range(3)], dtype=np.float64)
         try:
             x = np.linalg.solve(a, b)
         except np.linalg.LinAlgError:
@@ -143,12 +144,12 @@ class Camera:
         f = vector2
         p1 = (f[0],f[1]*sympy.cos(theta[0])-f[2]*sympy.sin(theta[0]),f[1]*sympy.sin(theta[0])+f[2]*sympy.cos(theta[0]))
         p2 = (p1[0]*sympy.cos(theta[1])-p1[2]*sympy.sin(theta[1]),p1[1],p1[0]*sympy.sin(theta[1])+p1[2]*sympy.cos(theta[1]))
-        p3 = (p2[0]*sympy.cos(theta[2])-p2[1]*sympy.sin(theta[2]),p2[0]*sympy.sin(angles[2])+p2[1]*sympy.cos(angles[2]),p2[2])
+        p3 = (p2[0]*sympy.cos(theta[2])-p2[1]*sympy.sin(theta[2]),p2[0]*sympy.sin(theta[2])+p2[1]*sympy.cos(theta[2]),p2[2])
         eqs = [Eq(focal[i],p3[i]+self.origin[i]) for i in range(3)]
         try:
             solutions = nsolve(eqs, theta, (0.1,0.1,0.1), dict=True)
             solution = solutions[0]
-        except ValueError:
+        except (ValueError, ZeroDivisionError):
             print("error")
             return
         self.x_vector, self.y_vector = rotate([self.x_vector, self.y_vector], tuple(solution[theta[i]] for i in range(3)))
@@ -162,14 +163,122 @@ class Polyhedron:
     def __init__(self):
         self.verts = set()
         self.edges = set()
+        self.faces = set()
+    # return sequential points on the face
+    def circuit(face):
+        if not len(face):
+            return []
+        circuit = []
+        previous = frozenset()
+        edge_lookup = dict()
+        for edge in face:
+            for point in edge:
+                if point not in edge_lookup:
+                    edge_lookup[point] = set()
+                edge_lookup[point].add(edge)
+        start = list(face)[0]
+        previous = start
+        point = list(start)[0]
+        circuit.append(point)
+        current = list(edge_lookup[point] - set([start]))[0]
+        while current != start:
+            point = list(current - previous)[0]
+            circuit.append(point)
+            previous = current
+            current = list(edge_lookup[point] - set([current]))[0]
+        return circuit
+    # returns any edge that intersects the line segment between p1 and p2
+    def intersect(self, p1, p2):
+        output = []
+        for edge in self.edges:
+            p3, p4 = tuple(edge)
+            alpha, beta = symbols("alpha beta")
+            eqs = [Eq(alpha*p1[i]+(1-alpha)*p2[i], beta*p3[i]+(1-beta)*p4[i]) for i in range(3)]
+            solutions = solve(eqs, dict=True)
+            if len(solutions):
+                alpha, beta = solutions[0][alpha], solutions[0][beta]
+                if alpha >= 0 and alpha <= 1 and beta >= 0 and beta <= 1:
+                    output.append(edge)
+        return output
+    def inside_triangle(triangle, point):
+        triangle = list(triangle)
+        alpha, beta = symbols("alpha beta")
+        print(triangle)
+        exprs = [alpha*triangle[0][i]+(1-alpha)*triangle[1][i] for i in range(3)]
+        exprs = [beta*x+(1-beta)*triangle[2][i] for i,x in enumerate(exprs)]
+        eqs = [Eq(x,point[i]) for i,x in enumerate(exprs)]
+        solutions = solve(eqs)
+        if len(solutions):
+            alpha, beta = solutions[0][alpha], solutions[0][beta]
+            if alpha >= 0 and alpha <= 1 and beta >= 0 and beta <= 1:
+                return True
+        return False
+    def triangulation(face):
+        circuit = Polyhedron.circuit(face)
+        output = []
+        for i,x in enumerate(circuit):
+            for j,y in enumerate(circuit):
+                for k,z in enumerate(circuit):
+                    points = set([x,y,z])
+                    if len(points) != 3:
+                        continue
+                    '''
+                    for w in circuit:
+                        if w not in points and Polyhedron.inside_triangle(points, w):
+                            continue
+                    '''
+                    output.append(points)
+                    polygons = (circuit[k:]+circuit[:i+1], circuit[i:j+1], circuit[j:k+1])
+                    print(polygons)
+                    for polygon in polygons:
+                        if len(polygon) == 3:
+                            output.append(set(polygon))
+                        else:
+                            sub_face = frozenset([frozenset([w,polygon[(l+1)%len(polygon)]]) for l,w in enumerate(polygon)])
+                            if len(sub_face) > 2:
+                                output.extend(Polyhedron.triangulation(sub_face))
+                    return output
+        return output
+    # Cast a ray from position in direction, return where on the polyhedron it hits
+    def ray(self, position, direction):
+        output = []
+        print(self.faces, "faces")
+        for face in self.faces:
+            for triangle in Polyhedron.triangulation(face):
+                triangle = list(triangle)
+                alpha, beta, gamma = symbols("alpha beta gamma")
+                exprs = [alpha*triangle[0][i]+(1-alpha)*triangle[1][i] for i in range(3)]
+                exprs = [beta*x+(1-beta)*triangle[2][i] for i,x in enumerate(exprs)]
+                eqs = [Eq(expr,position[i]+direction[i]*gamma) for i,expr in enumerate(exprs)]
+                '''
+                a,b,g = 0,0,0
+                exprs = [(x-position[i]+direction[i]*gamma)**2 for i,x in enumerate(exprs)]
+                for i in range(1000):
+                    da = diff(sum(exprs), alpha).subs(alpha,a).subs(beta,b).subs(gamma,g)
+                    db = diff(sum(exprs), beta).subs(alpha,a).subs(beta,b).subs(gamma,g)
+                    dg = diff(sum(exprs), gamma).subs(alpha,a).subs(beta,b).subs(gamma,g)
+                    a -= da*0.0001
+                    b -= db*0.0001
+                    g -= dg*0.0001
+                    print(sum(exprs).subs(alpha,a).subs(beta,b).subs(gamma,g),a,b,g,da,db,dg)
+                sys.exit()
+                '''
+                #beta*(alpha*triangle[0][i]+(1-alpha)*triangle[1][i])+(1-beta)*triangle[2][i]
+                try:
+                    solutions = nsolve(eqs, (alpha,beta,gamma), (1,1,1), dict=True)
+                except ValueError:
+                    continue
+                alpha, beta, gamma = solutions[0][alpha], solutions[0][beta], solutions[0][gamma]
+                #(beta*(alpha*triangle[0][i]+(1-alpha)*triangle[1][i])+(1-beta)*triangle[2][i]-position[i]+direction[i]*gamma)**2
+                if alpha >= 0 and alpha <= 1 and beta >= 0 and beta <= 1:
+                    point = tuple(alpha*triangle[0][i]+(1-alpha)*triangle[1][i] for i in range(3))
+                    point = tuple(beta*x+(1-beta)*triangle[2][i] for i,x in enumerate(point))
+                    output.append((gamma, point, face))
+                    double_break = True
+                    break
+        return sorted(output)
+
     
-camera = Camera()
-camera.focal = (0,0,-1000)
-camera.zoom = 100
-print(camera.project((1,1,1)))
-
-
-print(rotate([(1,1,1)], (pi,0,0)))
 def cross(vector1, vector2):
     return (vector1[1]*vector2[2]-vector1[2]*vector2[1], vector1[2]*vector2[0]-vector1[0]*vector2[2],vector1[0]*vector2[1]-vector1[1]*vector2[0])
 class Body:
@@ -216,10 +325,11 @@ class Body:
         self.vel = (vel[0]+acc[0]*dt, vel[1]+acc[1]*dt, vel[2]+acc[2]*dt)
         self.pos = (pos[0]+vel[0]*dt, pos[1]+vel[1]*dt, pos[2]+vel[2]*dt)
         points = {p:(p[0]+vel[0]*dt,p[1]+vel[1]*dt,p[2]+vel[2]*dt) for p in self.polyhedron.verts}
-        edges = {frozenset([points[p] for p in edge]) for edge in self.polyhedron.edges}
+        edges = {edge:frozenset([points[p] for p in edge]) for edge in self.polyhedron.edges}
         polyhedron = Polyhedron()
         polyhedron.verts = {points[key] for key in points}
-        polyhedron.edges = edges
+        polyhedron.edges = {edges[key] for key in edges}
+        polyhedron.faces = {frozenset([edges[edge] for edge in face]) for face in self.polyhedron.faces}
         racc = self.racc
         rvel = self.rvel
         rpos = self.rpos
@@ -230,10 +340,12 @@ class Body:
         rotated = rotate(shifted, (rvel[0]*dt, rvel[1]*dt, rvel[2]*dt))
         shifted = shift(rotated, self.pos)
         points = {x:shifted[i] for i,x in enumerate(points)}
-        edges = {frozenset([points[p] for p in edge]) for edge in polyhedron.edges}
+        edges = {edge:frozenset([points[p] for p in edge]) for edge in polyhedron.edges}
+        faces = {frozenset([edges[edge] for edge in face]) for face in polyhedron.faces}
         polyhedron = Polyhedron()
         polyhedron.verts = {points[key] for key in points}
-        polyhedron.edges = edges
+        polyhedron.edges = {edges[key] for key in edges}
+        polyhedron.faces = faces
         self.polyhedron = polyhedron
     def zero_forces(self):
         self.acc = (0,0,0)
@@ -251,6 +363,7 @@ class Body:
             self.apply((0,9.8*dt*self.mass,0), point)
             #self.vel = (self.vel[0]*0.1**dt,0, self.vel[2]*0.1**dt)
             self.vel = (self.vel[0]*0.1**dt,-self.vel[1]*0.5, self.vel[2]*0.1**dt)
+            #self.vel = (self.vel[0]*0.1**dt,0, self.vel[2]*0.1**dt)
             #self.vel = (self.vel[0],0, self.vel[2])
             self.apply((-self.vel[0]*dt,-self.vel[1]*dt, -self.vel[2]*dt),point)
             #self.vel = (0,0,0)
@@ -266,11 +379,62 @@ class Body:
             points = list(self.polyhedron.verts)
             shifted = shift(points, (0, delta, 0))
             points = {x:shifted[i] for i,x in enumerate(points)}
-            edges = {frozenset([points[p] for p in edge]) for edge in self.polyhedron.edges}
-            polyhedron.verts = set(points[key] for key in points)
-            polyhedron.edges = edges
+            edges = {edge:frozenset([points[p] for p in edge]) for edge in self.polyhedron.edges}
+            faces = {frozenset([edges[edge] for edge in face]) for face in self.polyhedron.faces}
+            polyhedron.verts = {points[key] for key in points}
+            polyhedron.edges = {edges[key] for key in edges}
+            polyhedron.faces = faces
             self.polyhedron = polyhedron
-        
+
+def coplanar(points):
+    if len(points) < 4:
+        return True
+    points = list(points)
+    '''
+    alpha, beta = symbols("alpha beta")
+    exprs = [alpha*(points[1][i]-points[0][i])+beta*(points[2][i]-points[0][i]) for i in range(3)]
+    for p in points[3:]:
+        eqs = [Eq(expr,p[i]-points[0][i]) for i,expr in enumerate(exprs)]
+        if not len(solve(eqs)):
+            return False
+    '''
+    for p in points[3:]:
+        a = np.array([[points[1][i]-points[0][i],points[2][i]-points[0][i]] for i in range(3)])
+        b = np.array([p[i]-points[0][i] for i in range(3)])
+        x, res, rank, s = np.linalg.lstsq(a, b)
+        #print(a, b, x, res)
+        if not np.allclose(np.dot(a, x), b):
+            return False
+    return True
+
+def construct_faces(edges):
+    edge_lookup = dict()
+    for edge in edges:
+        for point in edge:
+            if point not in edge_lookup:
+                edge_lookup[point] = set()
+            edge_lookup[point].add(edge)
+    cycles = set()
+    queue = [(edge,) for edge in edges]
+    while len(queue):
+        #print([len(x) for x in queue], [len(x) for x in cycles])
+        path = queue.pop()
+        for point in path[-1]:
+            if len(path) == 1 or point not in path[-2]:
+                for edge in edge_lookup[point]:
+                    if edge not in path:
+                        new_path = path + (edge,)
+                        points = {point for edge in new_path for point in edge}
+                        if len(new_path) > 2:
+                            if coplanar(points):
+                                if len(new_path[0] & new_path[-1]):
+                                    cycles.add(frozenset(new_path))
+                                else:
+                                    queue.append(new_path)
+                        else:
+                            queue.append(new_path)
+    return cycles
+
 def get_cube(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
     points = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]
     points.extend([(p[0],p[1],1) for p in points])
@@ -286,7 +450,20 @@ def get_cube(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
     polyhedron = Polyhedron()
     polyhedron.verts = set(points)
     polyhedron.edges = set([frozenset(x) for x in edges])
+    polyhedron.faces = construct_faces(polyhedron.edges)
+    print(len(polyhedron.faces), "len faces")
     return polyhedron
+
+class Crosshair():
+    def __init__(self):
+        self.pos = (0,0)
+    def draw(self, pygame, screen):
+        screen_width, screen_height = screen.get_size()
+        p = [(self.pos[0]+screen_width/2+x, -self.pos[1]+screen_height/2) for x in (-10,10)]
+        pygame.draw.line(screen, "white", p[0], p[1])
+        p = [(self.pos[0]+screen_width/2, -self.pos[1]+screen_height/2+x) for x in (-10,10)]
+        pygame.draw.line(screen, "white", p[0], p[1])
+
 
 class Grid():
     def __init__(self):
@@ -329,29 +506,31 @@ class Grid():
             pygame.draw.line(screen, "white", p[0], p[1])
 
 
+
+
+camera = Camera()
+camera.focal = (0,0,-10)
+camera.zoom = 100
+print(camera.project((1,1,1)))
+
+
+print(rotate([(1,1,1)], (pi,0,0)))
 cube = get_cube()
-print(cube.verts)
+print('hi',cube.verts)
 
-pygame.init()
-screen_width = 1280
-screen_height = 720
-screen = pygame.display.set_mode((screen_width, screen_height))
-clock = pygame.time.Clock()
-running = True
-
-angles = [0,0,0]
+#angles = [0,0,0]
 #masses = [Mass(mass=100, pos=(500,500,500)), Mass(mass=100, pos=(600,500,500))]
 #springs = [Spring(masses[0], masses[1], length=99.99, k=10)]
 
-cube = get_cube(displacement=(5000,5000,100000), factors=10000, angles=tuple(2*pi*random.random() for i in range(3)))
+#cube = get_cube(displacement=(5000,5000,100000), factors=10000, angles=tuple(2*pi*random.random() for i in range(3)))
 #cube = get_cube(displacement=(500,500,100), factors=50, angles=tuple(2*pi*random.random() for i in range(3)))
-masses = [Mass(mass=100000,pos=x) for x in cube.verts]
+#masses = [Mass(mass=100000,pos=x) for x in cube.verts]
 
 #for mass in masses:
 #    mass.vel = (100,-1000,0)
-links = [(x,y) for x in masses for y in masses if frozenset((x.pos,y.pos)) in cube.edges]
-for mass in masses:
-    mass.vel = (1000,-1000,0)
+#links = [(x,y) for x in masses for y in masses if frozenset((x.pos,y.pos)) in cube.edges]
+#for mass in masses:
+#    mass.vel = (1000,-1000,0)
 '''
 for i in range(10):
     i1, i2, i3  = 0,0,0
@@ -366,7 +545,7 @@ for i in range(10):
 #masses.extend(masses2)
 '''
 #springs = [Spring(masses[i], masses[j], length=masses[i].distance(masses[j]), k=1000) for i in range(len(masses)) for j in range(len(masses)) if i != j]
-springs = [Spring(masses[i], masses[j], length=masses[i].distance(masses[j]), k=float('inf')) for i in range(len(masses)) for j in range(len(masses)) if i != j]
+#springs = [Spring(masses[i], masses[j], length=masses[i].distance(masses[j]), k=float('inf')) for i in range(len(masses)) for j in range(len(masses)) if i != j]
 
 cube = get_cube(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
 #cube = get_cube(displacement=(5,5,1), factors=2, angles=(0,0,2*pi*random.random()))
@@ -374,12 +553,23 @@ center = (sum(p[0] for p in cube.verts)/len(cube.verts),sum(p[1] for p in cube.v
 body = Body(1, center, polyhedron=cube)
 #body.apply((1000,0,0), list(cube.verts)[0])
 body.rvel = (0,0,1)
-body.vel = (0,0,100)
+#body.vel = (0,0,100)
 grid = Grid()
 camera_angular = [0,0,0]
 camera_velocity = [0,0,0]
 force = 0
 space_down = False
+crosshair = Crosshair()
+
+pygame.init()
+screen_width = 1280
+screen_height = 720
+screen = pygame.display.set_mode((screen_width, screen_height))
+clock = pygame.time.Clock()
+pygame.mouse.set_visible(False)
+pygame.mouse.set_pos((screen_width/2, screen_height/2))
+running = True
+framerate = 60
 while running:
     body.zero_forces()
     for event in pygame.event.get():
@@ -447,52 +637,53 @@ while running:
                 camera_velocity = [0,0,0]
             if event.key == pygame.K_SPACE:
                 space_down = False
-                body.apply((0,0,force), body.pos)
+                pos = list(camera.origin)
+                for i in range(3):
+                    pos[i] += camera.x_vector[i]*crosshair.pos[0]/camera.zoom
+                    pos[i] += camera.y_vector[i]*crosshair.pos[1]/camera.zoom
+                vector = tuple(pos[i]-camera.focal[i] for i in range(3))
+                mag = sqrt(dot(vector,vector))
+                vector = tuple(vector[i]/mag for i in range(3))
+                hits = body.polyhedron.ray(pos,vector)
+                if len(hits):
+                    print(hits)
+                    force_vector = tuple(vector[i]*force for i in range(3))
+                    body.apply(force_vector, hits[0][1])
                 force = 0
+        if event.type == pygame.MOUSEMOTION:
+            x,y = pygame.mouse.get_pos()
+            x -= screen_width/2
+            y = -(y-screen_height/2)
+            crosshair.pos = (x,y)
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            pass
+
+
+    #print("rel", pygame.mouse.get_rel(), "pos", pygame.mouse.get_pos())
     #pygame.draw.circle(screen, "red", (0,0), 40)
     screen.fill("black")
-    for i,x in enumerate(angles):
-        angles[i] += 2*(random.random()-0.5)*0.10
-    cube = get_cube(displacement=(500,500,1000), factors=100, angles=angles)
-    projection = {x:camera.project(x) for x in cube.verts}
-    for edge in cube.edges:
-        p1, p2 = tuple(edge)
-        p1, p2 = projection[p1], projection[p2]
-        pygame.draw.line(screen, "white", p1, p2)
-    colors = ["red", "blue"]
-    for i,mass in enumerate(masses):
-        pos = camera.project(mass.pos)
-        #pygame.draw.circle(screen, colors[i], pos, 1)
-        pygame.draw.circle(screen, "red", pos, 1)
-    for link in links:
-        p1, p2 = link[0].pos, link[1].pos
-        pygame.draw.line(screen, "white", camera.project(p1), camera.project(p2))
-    for mass in masses:
-        mass.zero_forces()
-    for spring in springs:
-        spring.apply()
+    crosshair.draw(pygame, screen)
     for edge in body.polyhedron.edges:
         p1, p2 = tuple(edge)
+        print(p1,p2)
         p1, p2 = camera.project(p1), camera.project(p2)
         p1 = (p1[0]*1+screen_width/2,p1[1]*-1+screen_height/2)
         p2 = (p2[0]*1+screen_width/2,p2[1]*-1+screen_height/2)
         pygame.draw.line(screen, "white", p1, p2)
     grid.draw(pygame,screen)
     pygame.display.flip()
-    dt = clock.tick() / 1000
-    for mass in masses:
-        gravity(mass, dt*100)
-        mass.simulate(dt*100)
-        ground(mass, dt*100)
-        drag(mass, dt*100)
+    dT = clock.tick(60) / 1000
+    dt = 1/framerate 
     body.gravity(dt*5)
     body.ground(dt*5)
     body.simulate(dt*5)
-    camera.rotate(tuple(x*dt for x in camera_angular))
+    camera.rotate(tuple(x*dt*100 for x in camera_angular))
     camera.move(tuple(x*dt*100 for x in camera_velocity))
     #camera.look(body.pos)
-    print(dt, force)
     if space_down:
-        force += dt*10000
+        force += dt*100
+    print("dT", dT, force)
+    if dt > 0.5:
+        sys.exit()
 
 pygame.quit()
