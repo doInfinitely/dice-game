@@ -5,6 +5,8 @@ from math import sin, cos, pi, sqrt, copysign
 import random
 import numpy as np
 import multiprocessing as mp
+import queue
+from PIL import Image
 
 def shift(points, displacement=(0,0,0)):
     output = []
@@ -31,67 +33,8 @@ def rotate(points, angles=(0,0,0)):
         output.append(p)
     return output
 
-class Mass:
-    def __init__(self, mass=1, pos=(0,0,0), vel=(0,0,0), acc=(0,0,0)):
-        self.mass = mass
-        self.pos = pos
-        self.vel = vel
-        self.acc = acc
-    def simulate(self, dt):
-        acc = self.acc
-        vel = self.vel
-        pos = self.pos
-        self.vel = (vel[0]+acc[0]*dt, vel[1]+acc[1]*dt, vel[2]+acc[2]*dt)
-        self.pos = (pos[0]+vel[0]*dt, pos[1]+vel[1]*dt, pos[2]+vel[2]*dt)
-    def zero_forces(self):
-        self.acc = (0,0,0)
-    def apply(self, force=(0,0,0)):
-        acc = self.acc
-        m = self.mass
-        self.acc = (acc[0]+force[0]/m, acc[1]+force[1]/m, acc[2]+force[2]/m)
-    def distance(self, other):
-        return sqrt(sum((self.pos[i]-other.pos[i])**2 for i in range(3)))
-
 def dot(vector1, vector2):
     return sum(x*vector2[i] for i,x in enumerate(vector1))
-class Spring:
-    def __init__(self, m1, m2, length=1, k=1):
-        self.m1 = m1
-        self.m2 = m2
-        self.length = length
-        self.k = k
-    def apply(self):
-        m1 = self.m1
-        m2 = self.m2
-        distance = m1.distance(m2)
-        if self.k == float('inf'):
-            diff = distance-self.length
-            mass = m1.mass + m2.mass
-            vec = (m2.pos[0]-m1.pos[0], m2.pos[1]-m1.pos[1], m2.pos[2]-m1.pos[2])
-            mag = sqrt(dot(vec, vec))
-            unit = (vec[0]/mag, vec[1]/mag, vec[2]/mag)
-            m1.pos = (m1.pos[0]+unit[0]*diff*m2.mass/mass,m1.pos[1]+unit[1]*diff*m2.mass/mass,m1.pos[2]+unit[2]*diff*m2.mass/mass)
-            unit = (-unit[0],-unit[1],-unit[2])
-            m2.pos = (m2.pos[0]+unit[0]*diff*m1.mass/mass,m2.pos[1]+unit[1]*diff*m1.mass/mass,m2.pos[2]+unit[2]*diff*m1.mass/mass)
-            return
-        sign = copysign(1,distance-self.length)
-        vector = (sign*self.k*(m2.pos[0]-m1.pos[0]), sign*self.k*(m2.pos[1]-m1.pos[1]), sign*self.k*(m2.pos[2]-m1.pos[2]))
-        m1.apply(vector)
-        vector = (-vector[0], -vector[1], -vector[2])
-        m2.apply(vector)
-
-def gravity(mass, dt):
-    mass.apply((0,-9.8*mass.mass*dt,0))
-
-def ground(mass, dt):
-    if mass.pos[1] < 0:
-        mass.pos = (mass.pos[0], 0, mass.pos[2])
-        mass.vel = (mass.vel[0], -mass.vel[1], mass.vel[2])
-        # friction
-        mass.vel = (mass.vel[0]*0.5**dt, mass.vel[1], mass.vel[2]*0.5**dt)
-
-def drag(mass, dt):
-    mass.vel = (mass.vel[0]*0.995**dt, mass.vel[1]*0.995**dt, mass.vel[2]*0.995**dt)
 
 class Camera:
     def __init__(self):
@@ -464,7 +407,42 @@ class Crosshair():
         p = [(self.pos[0]+screen_width/2, -self.pos[1]+screen_height/2+x) for x in (-10,10)]
         pygame.draw.line(screen, "white", p[0], p[1])
 
+def load_texture(file_path):
+    image = Image.open(file_path)
+    bitmap = [[] for i in range(image.size[1])]
+    for j in range(image.size[1]):
+        for i in range(image.size[0]):
+            pixel = image.getpixel((i,j))
+            bitmap[j].append(int(sum(pixel)/3 < 128))
+    return bitmap
 
+class Texture():
+    def __init__(self, bitmap, polygon, center=None):
+        self.bitmap = bitmap
+        self.polygon = polygon
+        self.center = center
+        points = {point for edge in polygon for point in edge}
+        points = list(points)
+        if center is None:
+            self.center = tuple(sum([point[i] for point in points])/len(points) for i in range(3))
+        self.x_vector = (1,0,0)
+        self.x_vector = tuple((points[1][i]-points[0][i])/len(self.bitmap[0]) for i in range(3))
+        self.y_vector = (0,1,0)
+        self.y_vector = tuple((points[2][i]-points[0][i])/len(self.bitmap) for i in range(3))
+    def draw(self, pygame, screen):
+        screen_width, screen_height = screen.get_size()
+        bitmap_center = (len(self.bitmap)/2+0.5, len(self.bitmap[0])/2+0.5)
+        polygon_center = self.center
+        for i,x in enumerate(self.bitmap):
+            for j,y in enumerate(x):
+                if y == 1:
+                    pos = (-(i+0.5-bitmap_center[0]),j+0.5-bitmap_center[1])
+                    pos = tuple(self.x_vector[k]*pos[1]+self.y_vector[k]*pos[0] for k in range(3))
+                    pos = tuple(pos[k]+polygon_center[k] for k in range(3))
+                    pos = camera.project(pos)
+                    pos = (pos[0]+screen_width/2,-pos[1]+screen_height/2)
+                    pygame.draw.circle(screen, "white", pos, 1)
+bitmap = load_texture('six.png')
 class Grid():
     def __init__(self):
         self.origin = (0,0,0)
@@ -506,6 +484,10 @@ class Grid():
             pygame.draw.line(screen, "white", p[0], p[1])
 
 
+def apply_function(input_queue, output_queue):
+    while True:
+        f, args = input_queue.get()
+        output_queue.put(f(*args))
 
 
 camera = Camera()
@@ -561,129 +543,145 @@ force = 0
 space_down = False
 crosshair = Crosshair()
 
-pygame.init()
-screen_width = 1280
-screen_height = 720
-screen = pygame.display.set_mode((screen_width, screen_height))
-clock = pygame.time.Clock()
-pygame.mouse.set_visible(False)
-pygame.mouse.set_pos((screen_width/2, screen_height/2))
-running = True
-framerate = 60
-while running:
-    body.zero_forces()
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_a:
-                camera_angular[1] = 0.025
-            if event.key == pygame.K_d:
-                camera_angular[1] = -0.025
-            if event.key == pygame.K_w:
-                camera_angular[0] = -0.025
-            if event.key == pygame.K_s:
-                camera_angular[0] = 0.025
-            if event.key == pygame.K_e:
-                camera_angular[2] = -0.025
-            if event.key == pygame.K_q:
-                camera_angular[2] = 0.025
-            if event.key == pygame.K_UP:
-                forward = camera.forward_vector()
-                for i in range(3):
-                    camera_velocity[i] = forward[i]
-            if event.key == pygame.K_DOWN:
-                forward = camera.forward_vector()
-                for i in range(3):
-                    camera_velocity[i] = -forward[i]
-            if event.key == pygame.K_LEFT:
-                for i in range(3):
-                    camera_velocity[i] = -camera.x_vector[i]
-            if event.key == pygame.K_RIGHT:
-                for i in range(3):
-                    camera_velocity[i] = camera.x_vector[i]
-            if event.key == pygame.K_LSHIFT:
-                for i in range(3):
-                    camera_velocity[i] = camera.y_vector[i]
-            if event.key == pygame.K_LCTRL:
-                for i in range(3):
-                    camera_velocity[i] = -camera.y_vector[i]
-            if event.key == pygame.K_SPACE:
-                space_down = True
-        if event.type == pygame.KEYUP:
-            if event.key == pygame.K_a:
-                camera_angular[1] = 0
-            if event.key == pygame.K_d:
-                camera_angular[1] = -0
-            if event.key == pygame.K_w:
-                camera_angular[0] = -0
-            if event.key == pygame.K_s:
-                camera_angular[0] = 0
-            if event.key == pygame.K_e:
-                camera_angular[2] = -0
-            if event.key == pygame.K_q:
-                camera_angular[2] = 0
-            if event.key == pygame.K_UP:
-                camera_velocity = [0,0,0]
-            if event.key == pygame.K_DOWN:
-                camera_velocity = [0,0,0]
-            if event.key == pygame.K_LEFT:
-                camera_velocity = [0,0,0]
-            if event.key == pygame.K_RIGHT:
-                camera_velocity = [0,0,0]
-            if event.key == pygame.K_LSHIFT:
-                camera_velocity = [0,0,0]
-            if event.key == pygame.K_LCTRL:
-                camera_velocity = [0,0,0]
-            if event.key == pygame.K_SPACE:
-                space_down = False
-                pos = list(camera.origin)
-                for i in range(3):
-                    pos[i] += camera.x_vector[i]*crosshair.pos[0]/camera.zoom
-                    pos[i] += camera.y_vector[i]*crosshair.pos[1]/camera.zoom
-                vector = tuple(pos[i]-camera.focal[i] for i in range(3))
-                mag = sqrt(dot(vector,vector))
-                vector = tuple(vector[i]/mag for i in range(3))
-                hits = body.polyhedron.ray(pos,vector)
-                if len(hits):
-                    print(hits)
-                    force_vector = tuple(vector[i]*force for i in range(3))
-                    body.apply(force_vector, hits[0][1])
-                force = 0
-        if event.type == pygame.MOUSEMOTION:
-            x,y = pygame.mouse.get_pos()
-            x -= screen_width/2
-            y = -(y-screen_height/2)
-            crosshair.pos = (x,y)
-        if event.type == pygame.MOUSEBUTTONDOWN:
+if __name__ == "__main__":
+    input_queue = mp.Queue()
+    output_queue = mp.Queue()
+    process = mp.Process(target=apply_function, args=(input_queue,output_queue))
+    process.start()
+    pygame.init()
+    screen = pygame.display.set_mode((1280, 720))
+    screen_width, screen_height = screen.get_size()
+    clock = pygame.time.Clock()
+    pygame.mouse.set_visible(False)
+    pygame.mouse.set_pos((screen_width/2, screen_height/2))
+    running = True
+    framerate = 60
+    while running:
+        body.zero_forces()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_a:
+                    camera_angular[1] = 0.025
+                if event.key == pygame.K_d:
+                    camera_angular[1] = -0.025
+                if event.key == pygame.K_w:
+                    camera_angular[0] = -0.025
+                if event.key == pygame.K_s:
+                    camera_angular[0] = 0.025
+                if event.key == pygame.K_e:
+                    camera_angular[2] = -0.025
+                if event.key == pygame.K_q:
+                    camera_angular[2] = 0.025
+                if event.key == pygame.K_UP:
+                    forward = camera.forward_vector()
+                    for i in range(3):
+                        camera_velocity[i] = forward[i]
+                if event.key == pygame.K_DOWN:
+                    forward = camera.forward_vector()
+                    for i in range(3):
+                        camera_velocity[i] = -forward[i]
+                if event.key == pygame.K_LEFT:
+                    for i in range(3):
+                        camera_velocity[i] = -camera.x_vector[i]
+                if event.key == pygame.K_RIGHT:
+                    for i in range(3):
+                        camera_velocity[i] = camera.x_vector[i]
+                if event.key == pygame.K_LSHIFT:
+                    for i in range(3):
+                        camera_velocity[i] = camera.y_vector[i]
+                if event.key == pygame.K_LCTRL:
+                    for i in range(3):
+                        camera_velocity[i] = -camera.y_vector[i]
+                if event.key == pygame.K_SPACE:
+                    space_down = True
+            if event.type == pygame.KEYUP:
+                if event.key == pygame.K_a:
+                    camera_angular[1] = 0
+                if event.key == pygame.K_d:
+                    camera_angular[1] = -0
+                if event.key == pygame.K_w:
+                    camera_angular[0] = -0
+                if event.key == pygame.K_s:
+                    camera_angular[0] = 0
+                if event.key == pygame.K_e:
+                    camera_angular[2] = -0
+                if event.key == pygame.K_q:
+                    camera_angular[2] = 0
+                if event.key == pygame.K_UP:
+                    camera_velocity = [0,0,0]
+                if event.key == pygame.K_DOWN:
+                    camera_velocity = [0,0,0]
+                if event.key == pygame.K_LEFT:
+                    camera_velocity = [0,0,0]
+                if event.key == pygame.K_RIGHT:
+                    camera_velocity = [0,0,0]
+                if event.key == pygame.K_LSHIFT:
+                    camera_velocity = [0,0,0]
+                if event.key == pygame.K_LCTRL:
+                    camera_velocity = [0,0,0]
+                if event.key == pygame.K_SPACE:
+                    space_down = False
+                    pos = list(camera.origin)
+                    for i in range(3):
+                        pos[i] += camera.x_vector[i]*crosshair.pos[0]/camera.zoom
+                        pos[i] += camera.y_vector[i]*crosshair.pos[1]/camera.zoom
+                    vector = tuple(pos[i]-camera.focal[i] for i in range(3))
+                    mag = sqrt(dot(vector,vector))
+                    vector = tuple(vector[i]/mag for i in range(3))
+                    input_queue.put((body.polyhedron.ray, (pos,vector)))
+                    '''
+                    hits = body.polyhedron.ray(pos,vector)
+                    if len(hits):
+                        print(hits)
+                        force_vector = tuple(vector[i]*force for i in range(3))
+                        body.apply(force_vector, hits[0][1])
+                    force = 0
+                    '''
+            if event.type == pygame.MOUSEMOTION:
+                x,y = pygame.mouse.get_pos()
+                x -= screen_width/2
+                y = -(y-screen_height/2)
+                crosshair.pos = (x,y)
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                pass
+        try:
+            hits = output_queue.get(False)
+            if len(hits):
+                print(hits)
+                force_vector = tuple(vector[i]*force for i in range(3))
+                body.apply(force_vector, hits[0][1])
+            force = 0
+        except queue.Empty:
             pass
 
 
-    #print("rel", pygame.mouse.get_rel(), "pos", pygame.mouse.get_pos())
-    #pygame.draw.circle(screen, "red", (0,0), 40)
-    screen.fill("black")
-    crosshair.draw(pygame, screen)
-    for edge in body.polyhedron.edges:
-        p1, p2 = tuple(edge)
-        print(p1,p2)
-        p1, p2 = camera.project(p1), camera.project(p2)
-        p1 = (p1[0]*1+screen_width/2,p1[1]*-1+screen_height/2)
-        p2 = (p2[0]*1+screen_width/2,p2[1]*-1+screen_height/2)
-        pygame.draw.line(screen, "white", p1, p2)
-    grid.draw(pygame,screen)
-    pygame.display.flip()
-    dT = clock.tick(60) / 1000
-    dt = 1/framerate 
-    body.gravity(dt*5)
-    body.ground(dt*5)
-    body.simulate(dt*5)
-    camera.rotate(tuple(x*dt*100 for x in camera_angular))
-    camera.move(tuple(x*dt*100 for x in camera_velocity))
-    #camera.look(body.pos)
-    if space_down:
-        force += dt*100
-    print("dT", dT, force)
-    if dt > 0.5:
-        sys.exit()
-
-pygame.quit()
+        #print("rel", pygame.mouse.get_rel(), "pos", pygame.mouse.get_pos())
+        #pygame.draw.circle(screen, "red", (0,0), 40)
+        screen.fill("black")
+        crosshair.draw(pygame, screen)
+        #texture = Texture(bitmap, list(body.polyhedron.faces)[0], body.pos)
+        #texture.draw(pygame, screen)
+        for edge in body.polyhedron.edges:
+            p1, p2 = tuple(edge)
+            print(p1,p2)
+            p1, p2 = camera.project(p1), camera.project(p2)
+            p1 = (p1[0]*1+screen_width/2,p1[1]*-1+screen_height/2)
+            p2 = (p2[0]*1+screen_width/2,p2[1]*-1+screen_height/2)
+            pygame.draw.line(screen, "white", p1, p2)
+        grid.draw(pygame,screen)
+        pygame.display.flip()
+        dT = clock.tick(60) / 1000
+        dt = 1/framerate 
+        body.gravity(dt*5)
+        body.ground(dt*5)
+        body.simulate(dt*5)
+        camera.rotate(tuple(x*dt*100 for x in camera_angular))
+        camera.move(tuple(x*dt*100 for x in camera_velocity))
+        #camera.look(body.pos)
+        if space_down:
+            force += dt*100
+        print("dT", dT, force)
+    process.kill()
+    pygame.quit()
