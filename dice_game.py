@@ -108,24 +108,76 @@ class Polyhedron:
         self.edges = set()
         self.faces = set()
     # return sequential points on the face
-    def circuit(face):
+    def coplanar(points):
+        if len(points) < 4:
+            return True
+        points = list(points)
+        '''
+        alpha, beta = symbols("alpha beta")
+        exprs = [alpha*(points[1][i]-points[0][i])+beta*(points[2][i]-points[0][i]) for i in range(3)]
+        for p in points[3:]:
+            eqs = [Eq(expr,p[i]-points[0][i]) for i,expr in enumerate(exprs)]
+            if not len(solve(eqs)):
+                return False
+        '''
+        for p in points[3:]:
+            a = np.array([[points[1][i]-points[0][i],points[2][i]-points[0][i]] for i in range(3)])
+            b = np.array([p[i]-points[0][i] for i in range(3)])
+            x, res, rank, s = np.linalg.lstsq(a, b)
+            #print(a, b, x, res)
+            if not np.allclose(np.dot(a, x), b, atol=0.1):
+                return False
+        return True
+    def construct_faces(self):
+        edge_lookup = dict()
+        for edge_index, edge in enumerate(self.edges):
+            for index in edge:
+                point = self.verts[index]
+                if point not in edge_lookup:
+                    edge_lookup[point] = set()
+                edge_lookup[point].add(edge_index)
+        cycles = set()
+        queue = [(index,) for index,edge in enumerate(self.edges)]
+        while len(queue):
+            #print([len(x) for x in queue], [len(x) for x in cycles])
+            path = queue.pop()
+            for index in self.edges[path[-1]]:
+                if len(path) == 1 or self.verts[index] not in self.edges[path[-2]]:
+                    point = self.verts[index]
+                    for edge in edge_lookup[point]:
+                        if edge not in path:
+                            new_path = path + (edge,)
+                            points = {self.verts[index] for edge_index in new_path for index in self.edges[edge_index]}
+                            if len(new_path) > 2:
+                                if Polyhedron.coplanar(points):
+                                    if len(self.edges[new_path[0]] & self.edges[new_path[-1]]):
+                                        cycles.add(frozenset(new_path))
+                                    else:
+                                        queue.append(new_path)
+                            else:
+                                queue.append(new_path)
+        self.faces = list(cycles)
+    def circuit(self, face_index):
+        face = self.faces[face_index]
         if not len(face):
             return []
         circuit = []
         previous = frozenset()
         edge_lookup = dict()
-        for edge in face:
-            for point in edge:
+        for edge_index in face:
+            edge = self.edges[edge_index]
+            for index in self.edges[edge_index]:
+                point = self.verts[index]
                 if point not in edge_lookup:
                     edge_lookup[point] = set()
                 edge_lookup[point].add(edge)
-        start = list(face)[0]
+        start = self.edges[list(face)[0]]
         previous = start
-        point = list(start)[0]
+        point = self.verts[list(start)[0]]
         circuit.append(point)
         current = list(edge_lookup[point] - set([start]))[0]
         while current != start:
-            point = list(current - previous)[0]
+            point = self.verts[list(current - previous)[0]]
             circuit.append(point)
             previous = current
             current = list(edge_lookup[point] - set([current]))[0]
@@ -134,7 +186,7 @@ class Polyhedron:
     def intersect(self, p1, p2):
         output = []
         for edge in self.edges:
-            p3, p4 = tuple(edge)
+            p3, p4 = tuple(self.verts[index] for index in edge)
             alpha, beta = symbols("alpha beta")
             eqs = [Eq(alpha*p1[i]+(1-alpha)*p2[i], beta*p3[i]+(1-beta)*p4[i]) for i in range(3)]
             solutions = solve(eqs, dict=True)
@@ -156,8 +208,7 @@ class Polyhedron:
             if alpha >= 0 and alpha <= 1 and beta >= 0 and beta <= 1:
                 return True
         return False
-    def triangulation(face):
-        circuit = Polyhedron.circuit(face)
+    def triangulation(circuit):
         output = []
         for i,x in enumerate(circuit):
             for j,y in enumerate(circuit):
@@ -172,22 +223,19 @@ class Polyhedron:
                     '''
                     output.append(points)
                     polygons = (circuit[k:]+circuit[:i+1], circuit[i:j+1], circuit[j:k+1])
-                    print(polygons)
                     for polygon in polygons:
                         if len(polygon) == 3:
                             output.append(set(polygon))
                         else:
-                            sub_face = frozenset([frozenset([w,polygon[(l+1)%len(polygon)]]) for l,w in enumerate(polygon)])
-                            if len(sub_face) > 2:
-                                output.extend(Polyhedron.triangulation(sub_face))
+                                output.extend(Polyhedron.triangulation(polygon))
                     return output
         return output
     # Cast a ray from position in direction, return where on the polyhedron it hits
     def ray(self, position, direction):
         output = []
-        print(self.faces, "faces")
-        for face in self.faces:
-            for triangle in Polyhedron.triangulation(face):
+        for face_index,face in enumerate(self.faces):
+            circuit = self.circuit(face_index)
+            for triangle in Polyhedron.triangulation(circuit):
                 triangle = list(triangle)
                 alpha, beta, gamma = symbols("alpha beta gamma")
                 exprs = [alpha*triangle[0][i]+(1-alpha)*triangle[1][i] for i in range(3)]
@@ -221,6 +269,143 @@ class Polyhedron:
                     break
         return sorted(output)
 
+def get_cube(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
+    points = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]
+    points.extend([(p[0],p[1],1) for p in points])
+    center = (0.5,0.5,0.5)
+    points = shift(points, (-center[0], -center[1], -center[2]))
+    points = scale(points, factors)
+    points = rotate(points, angles)
+    points = shift(points, center)
+    points = shift(points, displacement)
+    edges = [(i,(i+1)%4) for i in range(4)]
+    edges.extend([(4+i,4+(i+1)%4) for i in range(4)])
+    edges.extend([(i,i+4) for i in range(4)])
+    polyhedron = Polyhedron()
+    polyhedron.verts = points
+    polyhedron.edges = [frozenset(x) for x in edges]
+    polyhedron.construct_faces()
+    print(len(polyhedron.faces), "len faces")
+    print(polyhedron.faces)
+    return polyhedron
+
+def get_octahedron(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
+    points = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]
+    points.extend([(0.5,0.5,sqrt(1-sqrt(2*0.5**2))),(0.5,0.5,-sqrt(1-sqrt(2*0.5**2)))])
+    center = (0.5,0.5,0)
+    points = shift(points, (-center[0], -center[1], -center[2]))
+    points = scale(points, factors)
+    points = rotate(points, angles)
+    points = shift(points, center)
+    points = shift(points, displacement)
+    edges = [(i,(i+1)%4) for i in range(4)]
+    edges.extend([(i,4) for i in range(4)])
+    edges.extend([(i,5) for i in range(4)])
+    polyhedron = Polyhedron()
+    polyhedron.verts = points
+    polyhedron.edges = [frozenset(x) for x in edges]
+    polyhedron.construct_faces()
+    polyhedron.faces = [x for x in polyhedron.faces if len(x)==3]
+    print(len(polyhedron.faces), "len faces")
+    print(polyhedron.faces)
+    return polyhedron
+
+def get_tetrahedron(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
+    points = [(0,0.5,0),(0,-0.5,0),(sqrt(1-0.5**2),0,0),(sqrt(1-0.5**2)/2,0,sqrt(1-(1-0.5**2)))]
+    center = (sqrt(1-0.5**2)/2,0,sqrt(1-(1-0.5**2))/2)
+    points = shift(points, (-center[0], -center[1], -center[2]))
+    points = scale(points, factors)
+    points = rotate(points, angles)
+    points = shift(points, center)
+    points = shift(points, displacement)
+    edges = [(i,j) for i in range(4) for j in range(i+1,4)]
+    polyhedron = Polyhedron()
+    polyhedron.verts = points
+    polyhedron.edges = [frozenset(x) for x in edges]
+    polyhedron.construct_faces()
+    print(len(polyhedron.faces), "len faces")
+    print(polyhedron.faces)
+    return polyhedron
+
+def get_equilateral_triangle():
+    return [(0,0,0),(-0.5,-sqrt(1-0.5**2),0),(0.5,-sqrt(1-0.5**2),0)]
+def get_pentagonal_angle():
+    distance = float("inf")
+    angle = 0
+    delta = 0.1
+    while delta > 0.0001:
+        triangles = [get_equilateral_triangle()]
+        triangles[0] = rotate(triangles[0], (angle+delta,0,0))
+        triangles.append(rotate(triangles[-1],(0,0,2*pi/5)))
+        new_distance = sum((triangles[0][1][i]-triangles[1][2][i])**2 for i in range(3))
+        if new_distance < distance:
+            distance = new_distance
+            angle += delta
+        else:
+            delta /= 2
+    return angle
+def get_pentagonal_pyramid():
+    points = [(0,0,0),(0,-1,0)]
+    angle = get_pentagonal_angle()
+    points = rotate(points, (angle,0,0))
+    for i in range(4):
+        points.extend(rotate(points[-1:],(0,0,2*pi/5)))
+    edges = [(0,i) for i in range(1,6)]
+    edges.extend([(1+i,1+(i+1)%5) for i in range(5)])
+    polyhedron = Polyhedron()
+    polyhedron.verts = points
+    polyhedron.edges = [frozenset(x) for x in edges]
+    polyhedron.construct_faces()
+    return polyhedron
+def get_icosahedron(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
+    pyramid = get_pentagonal_pyramid()
+    points = pyramid.verts
+    print(points)
+    points.extend([(p[0],p[1],-p[2]+points[5][2]*2-sqrt(1-0.5**2)) for p in rotate(points,(0,0,2*pi/10))])
+    center = (0,0,points[5][2]+sqrt(1-0.5**2)/2)
+    points = shift(points, (-center[0], -center[1], -center[2]))
+    points = scale(points, factors)
+    points = rotate(points, angles)
+    points = shift(points, center)
+    points = shift(points, displacement)
+    edges = [tuple(edge) for edge in pyramid.edges]
+    edges.extend([(e[0]+6,e[1]+6) for e in edges])
+    edges.extend([(1+i,1+(i-1)%5+6) for i in range(5)])
+    edges.extend([(1+i,1+i+6) for i in range(5)])
+    polyhedron = Polyhedron()
+    polyhedron.verts = points
+    polyhedron.edges = [frozenset(edge) for edge in edges]
+    polyhedron.construct_faces()
+    polyhedron.faces = [face for face in polyhedron.faces if len(face) == 3]
+    return polyhedron
+
+def get_dodecahedron(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
+    icosahedron = get_icosahedron()
+    points = []
+    edges = []
+    for face in icosahedron.faces:
+        triangle = list({icosahedron.verts[index] for edge_index in face for index in icosahedron.edges[edge_index]})
+        points.append(tuple((triangle[0][i]+triangle[1][i]+triangle[2][i])/3 for i in range(3)))
+    print(points)
+    center = (0,0,icosahedron.verts[5][2]+sqrt(1-0.5**2)/2)
+    points = shift(points, (-center[0], -center[1], -center[2]))
+    points = scale(points, factors)
+    points = rotate(points, angles)
+    points = shift(points, center)
+    points = shift(points, displacement)
+    for i,x in enumerate(icosahedron.faces):
+        for j,y in enumerate(icosahedron.faces):
+            if i < j and len(x & y):
+                edges.append((i,j))
+    length = sqrt(sum((points[edges[0][0]][i]-points[edges[0][1]][i])**2 for i in range(3)))
+    points = [(p[0]/length,p[1]/length,p[2]/length) for p in points]
+    length = sum((points[edges[0][0]][i]-points[edges[0][1]][i])**2 for i in range(3))
+    polyhedron = Polyhedron()
+    polyhedron.verts = points
+    polyhedron.edges = [frozenset(edge) for edge in edges]
+    polyhedron.construct_faces()
+    polyhedron.faces = [face for face in polyhedron.faces if len(face) == 5]
+    return polyhedron
     
 def cross(vector1, vector2):
     return (vector1[1]*vector2[2]-vector1[2]*vector2[1], vector1[2]*vector2[0]-vector1[0]*vector2[2],vector1[0]*vector2[1]-vector1[1]*vector2[0])
@@ -260,36 +445,24 @@ class Body:
         Iz = sum((p[0]-pos[0])**2+(p[1]-pos[1])**2 for p in self.polyhedron.verts)*m/len(self.polyhedron.verts)
         racc = self.racc
         self.racc = (racc[0]+r[0]/Ix,racc[1]+r[1]/Iy,racc[2]+r[2]/Iz)
-        print(force, location, acc, self.racc, Ix, Iy, Iz)
+        #print(force, location, acc, self.racc, Ix, Iy, Iz)
     def simulate(self, dt):
         acc = self.acc
         vel = self.vel
         pos = self.pos
         self.vel = (vel[0]+acc[0]*dt, vel[1]+acc[1]*dt, vel[2]+acc[2]*dt)
         self.pos = (pos[0]+vel[0]*dt, pos[1]+vel[1]*dt, pos[2]+vel[2]*dt)
-        points = {p:(p[0]+vel[0]*dt,p[1]+vel[1]*dt,p[2]+vel[2]*dt) for p in self.polyhedron.verts}
-        edges = {edge:frozenset([points[p] for p in edge]) for edge in self.polyhedron.edges}
-        polyhedron = Polyhedron()
-        polyhedron.verts = {points[key] for key in points}
-        polyhedron.edges = {edges[key] for key in edges}
-        polyhedron.faces = {frozenset([edges[edge] for edge in face]) for face in self.polyhedron.faces}
+        self.polyhedron.verts = [(p[0]+vel[0]*dt,p[1]+vel[1]*dt,p[2]+vel[2]*dt) for p in self.polyhedron.verts]
         racc = self.racc
         rvel = self.rvel
         rpos = self.rpos
         self.rvel = (rvel[0]+racc[0]*dt, rvel[1]+racc[1]*dt, rvel[2]+racc[2]*dt)
         self.rpos = (rpos[0]+rvel[0]*dt, rpos[1]+rvel[1]*dt, rpos[2]+rvel[2]*dt)
-        points = list(polyhedron.verts)
-        shifted = shift(points, (-self.pos[0], -self.pos[1], -self.pos[2]))
-        rotated = rotate(shifted, (rvel[0]*dt, rvel[1]*dt, rvel[2]*dt))
-        shifted = shift(rotated, self.pos)
-        points = {x:shifted[i] for i,x in enumerate(points)}
-        edges = {edge:frozenset([points[p] for p in edge]) for edge in polyhedron.edges}
-        faces = {frozenset([edges[edge] for edge in face]) for face in polyhedron.faces}
-        polyhedron = Polyhedron()
-        polyhedron.verts = {points[key] for key in points}
-        polyhedron.edges = {edges[key] for key in edges}
-        polyhedron.faces = faces
-        self.polyhedron = polyhedron
+        points = self.polyhedron.verts
+        points = shift(points, (-self.pos[0], -self.pos[1], -self.pos[2]))
+        points = rotate(points, (rvel[0]*dt, rvel[1]*dt, rvel[2]*dt))
+        points = shift(points, self.pos)
+        self.polyhedron.verts = points
     def zero_forces(self):
         self.acc = (0,0,0)
         self.racc = (0,0,0)
@@ -299,7 +472,7 @@ class Body:
         epsilon = .001
         points = sorted([(p[1], p) for p in self.polyhedron.verts])
         count = len([p for p in points if p[0]<epsilon])
-        print("count: ", count)
+        #print("count: ", count)
         if count > 0:
             point = (sum(p[1][0] for p in points if p[0]<epsilon)/count,sum(p[1][1] for p in points if p[0]<epsilon)/count,sum(p[1][2] for p in points if p[0]<epsilon)/count)
         if points[0][0] < epsilon:
@@ -318,84 +491,12 @@ class Body:
             pos = self.pos
             delta = -points[0][0]
             self.pos = (pos[0], pos[1]+delta, pos[2])
-            polyhedron = Polyhedron()
-            points = list(self.polyhedron.verts)
-            shifted = shift(points, (0, delta, 0))
-            points = {x:shifted[i] for i,x in enumerate(points)}
-            edges = {edge:frozenset([points[p] for p in edge]) for edge in self.polyhedron.edges}
-            faces = {frozenset([edges[edge] for edge in face]) for face in self.polyhedron.faces}
-            polyhedron.verts = {points[key] for key in points}
-            polyhedron.edges = {edges[key] for key in edges}
-            polyhedron.faces = faces
-            self.polyhedron = polyhedron
+            points = self.polyhedron.verts
+            points = shift(points, (0, delta, 0))
+            self.polyhedron.verts = points
 
-def coplanar(points):
-    if len(points) < 4:
-        return True
-    points = list(points)
-    '''
-    alpha, beta = symbols("alpha beta")
-    exprs = [alpha*(points[1][i]-points[0][i])+beta*(points[2][i]-points[0][i]) for i in range(3)]
-    for p in points[3:]:
-        eqs = [Eq(expr,p[i]-points[0][i]) for i,expr in enumerate(exprs)]
-        if not len(solve(eqs)):
-            return False
-    '''
-    for p in points[3:]:
-        a = np.array([[points[1][i]-points[0][i],points[2][i]-points[0][i]] for i in range(3)])
-        b = np.array([p[i]-points[0][i] for i in range(3)])
-        x, res, rank, s = np.linalg.lstsq(a, b)
-        #print(a, b, x, res)
-        if not np.allclose(np.dot(a, x), b):
-            return False
-    return True
 
-def construct_faces(edges):
-    edge_lookup = dict()
-    for edge in edges:
-        for point in edge:
-            if point not in edge_lookup:
-                edge_lookup[point] = set()
-            edge_lookup[point].add(edge)
-    cycles = set()
-    queue = [(edge,) for edge in edges]
-    while len(queue):
-        #print([len(x) for x in queue], [len(x) for x in cycles])
-        path = queue.pop()
-        for point in path[-1]:
-            if len(path) == 1 or point not in path[-2]:
-                for edge in edge_lookup[point]:
-                    if edge not in path:
-                        new_path = path + (edge,)
-                        points = {point for edge in new_path for point in edge}
-                        if len(new_path) > 2:
-                            if coplanar(points):
-                                if len(new_path[0] & new_path[-1]):
-                                    cycles.add(frozenset(new_path))
-                                else:
-                                    queue.append(new_path)
-                        else:
-                            queue.append(new_path)
-    return cycles
 
-def get_cube(displacement=(0,0,0), factors=(1,1,1), angles=(0,0,0)):
-    points = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]
-    points.extend([(p[0],p[1],1) for p in points])
-    center = (0.5,0.5,0.5)
-    points = shift(points, (-center[0], -center[1], -center[2]))
-    points = scale(points, factors)
-    points = rotate(points, angles)
-    points = shift(points, center)
-    points = shift(points, displacement)
-    edges = [(points[i],points[(i+1)%4]) for i in range(4)]
-    edges.extend([(points[4+i],points[4+(i+1)%4]) for i in range(4)])
-    edges.extend([(points[i],points[i+4]) for i in range(4)])
-    polyhedron = Polyhedron()
-    polyhedron.verts = set(points)
-    polyhedron.edges = set([frozenset(x) for x in edges])
-    polyhedron.faces = construct_faces(polyhedron.edges)
-    print(len(polyhedron.faces), "len faces")
-    return polyhedron
 
 class Crosshair():
     def __init__(self):
@@ -416,33 +517,59 @@ def load_texture(file_path):
             bitmap[j].append(int(sum(pixel)/3 < 128))
     return bitmap
 
+def process_textures(input_queue, output_queue, screen_size):
+    while True:
+        textures = input_queue.get()
+        output = []
+        for texture in textures:
+            output.extend(texture.draw_offline(screen_size))
+        output_queue.put(output)
 class Texture():
-    def __init__(self, bitmap, polygon, center=None):
+    def __init__(self, bitmap, polyhedron, face_index,  center=None):
         self.bitmap = bitmap
-        self.polygon = polygon
+        self.polyhedron = polyhedron
         self.center = center
-        points = {point for edge in polygon for point in edge}
-        points = list(points)
+        points = polyhedron.circuit(face_index)
         if center is None:
             self.center = tuple(sum([point[i] for point in points])/len(points) for i in range(3))
         self.x_vector = (1,0,0)
         self.x_vector = tuple((points[1][i]-points[0][i])/len(self.bitmap[0]) for i in range(3))
         self.y_vector = (0,1,0)
-        self.y_vector = tuple((points[2][i]-points[0][i])/len(self.bitmap) for i in range(3))
+        self.y_vector = tuple((points[3][i]-points[0][i])/len(self.bitmap) for i in range(3))
     def draw(self, pygame, screen):
         screen_width, screen_height = screen.get_size()
         bitmap_center = (len(self.bitmap)/2+0.5, len(self.bitmap[0])/2+0.5)
         polygon_center = self.center
+        output = []
         for i,x in enumerate(self.bitmap):
             for j,y in enumerate(x):
                 if y == 1:
+                    pass
                     pos = (-(i+0.5-bitmap_center[0]),j+0.5-bitmap_center[1])
                     pos = tuple(self.x_vector[k]*pos[1]+self.y_vector[k]*pos[0] for k in range(3))
                     pos = tuple(pos[k]+polygon_center[k] for k in range(3))
                     pos = camera.project(pos)
                     pos = (pos[0]+screen_width/2,-pos[1]+screen_height/2)
-                    pygame.draw.circle(screen, "white", pos, 1)
-bitmap = load_texture('six.png')
+                    output.append(pos)
+                    #pygame.draw.circle(screen, "white", pos, 1)
+        return output
+    def draw_offline(self, screen_size):
+        screen_width, screen_height = screen_size
+        bitmap_center = (len(self.bitmap)/2+0.5, len(self.bitmap[0])/2+0.5)
+        polygon_center = self.center
+        output = []
+        for i,x in enumerate(self.bitmap):
+            for j,y in enumerate(x):
+                if y == 1:
+                    pass
+                    pos = (-(i+0.5-bitmap_center[0]),j+0.5-bitmap_center[1])
+                    pos = tuple(self.x_vector[k]*pos[1]+self.y_vector[k]*pos[0] for k in range(3))
+                    pos = tuple(pos[k]+polygon_center[k] for k in range(3))
+                    pos = camera.project(pos)
+                    pos = (pos[0]+screen_width/2,-pos[1]+screen_height/2)
+                    output.append(pos)
+                    #pygame.draw.circle(screen, "white", pos, 1)
+        return output
 class Grid():
     def __init__(self):
         self.origin = (0,0,0)
@@ -491,7 +618,7 @@ def apply_function(input_queue, output_queue):
 
 
 camera = Camera()
-camera.focal = (0,0,-10)
+camera.focal = (0,0,-100)
 camera.zoom = 100
 print(camera.project((1,1,1)))
 
@@ -529,11 +656,23 @@ for i in range(10):
 #springs = [Spring(masses[i], masses[j], length=masses[i].distance(masses[j]), k=1000) for i in range(len(masses)) for j in range(len(masses)) if i != j]
 #springs = [Spring(masses[i], masses[j], length=masses[i].distance(masses[j]), k=float('inf')) for i in range(len(masses)) for j in range(len(masses)) if i != j]
 
-cube = get_cube(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
+#cube = get_cube(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
 #cube = get_cube(displacement=(5,5,1), factors=2, angles=(0,0,2*pi*random.random()))
-center = (sum(p[0] for p in cube.verts)/len(cube.verts),sum(p[1] for p in cube.verts)/len(cube.verts),sum(p[2] for p in cube.verts)/len(cube.verts))
-body = Body(1, center, polyhedron=cube)
+#center = (sum(p[0] for p in cube.verts)/len(cube.verts),sum(p[1] for p in cube.verts)/len(cube.verts),sum(p[2] for p in cube.verts)/len(cube.verts))
+#body = Body(1, center, polyhedron=cube)
 #body.apply((1000,0,0), list(cube.verts)[0])
+#octahedron = get_octahedron(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
+#center = (sum(p[0] for p in octahedron.verts)/len(octahedron.verts),sum(p[1] for p in octahedron.verts)/len(octahedron.verts),sum(p[2] for p in octahedron.verts)/len(octahedron.verts))
+#body = Body(1, center, polyhedron=octahedron)
+#tetrahedron = get_tetrahedron(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
+#center = (sum(p[0] for p in tetrahedron.verts)/len(tetrahedron.verts),sum(p[1] for p in tetrahedron.verts)/len(tetrahedron.verts),sum(p[2] for p in tetrahedron.verts)/len(tetrahedron.verts))
+#body = Body(1, center, polyhedron=tetrahedron)
+#icosahedron = get_icosahedron(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
+#center = (sum(p[0] for p in icosahedron.verts)/len(icosahedron.verts),sum(p[1] for p in icosahedron.verts)/len(icosahedron.verts),sum(p[2] for p in icosahedron.verts)/len(icosahedron.verts))
+#body = Body(1, center, polyhedron=icosahedron)
+dodecahedron = get_dodecahedron(displacement=(0,5,1), factors=2, angles=(2*pi*random.random(),2*pi*random.random(),2*pi*random.random()))
+center = (sum(p[0] for p in dodecahedron.verts)/len(dodecahedron.verts),sum(p[1] for p in dodecahedron.verts)/len(dodecahedron.verts),sum(p[2] for p in dodecahedron.verts)/len(dodecahedron.verts))
+body = Body(1, center, polyhedron=dodecahedron)
 body.rvel = (0,0,1)
 #body.vel = (0,0,100)
 grid = Grid()
@@ -542,15 +681,20 @@ camera_velocity = [0,0,0]
 force = 0
 space_down = False
 crosshair = Crosshair()
-
+bitmap6 = load_texture('six.png')
+bitmap1 = load_texture('one.png')
 if __name__ == "__main__":
-    input_queue = mp.Queue()
-    output_queue = mp.Queue()
-    process = mp.Process(target=apply_function, args=(input_queue,output_queue))
-    process.start()
+    hit_input_queue = mp.Queue()
+    hit_output_queue = mp.Queue()
+    hit_process = mp.Process(target=apply_function, args=(hit_input_queue,hit_output_queue))
+    hit_process.start()
     pygame.init()
     screen = pygame.display.set_mode((1280, 720))
     screen_width, screen_height = screen.get_size()
+    #texture_input_queue = mp.Queue()
+    #texture_output_queue = mp.Queue()
+    #texture_process = mp.Process(target=process_textures, args=(texture_input_queue, texture_output_queue, screen.get_size()))
+    #texture_process.start()
     clock = pygame.time.Clock()
     pygame.mouse.set_visible(False)
     pygame.mouse.set_pos((screen_width/2, screen_height/2))
@@ -558,6 +702,10 @@ if __name__ == "__main__":
     framerate = 60
     while running:
         body.zero_forces()
+        #textures = []
+        #textures.append(Texture(bitmap6, body.polyhedron, 0))
+        #textures.append(Texture(bitmap1, body.polyhedron, 4))
+        #texture_input_queue.put(textures)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -630,7 +778,7 @@ if __name__ == "__main__":
                     vector = tuple(pos[i]-camera.focal[i] for i in range(3))
                     mag = sqrt(dot(vector,vector))
                     vector = tuple(vector[i]/mag for i in range(3))
-                    input_queue.put((body.polyhedron.ray, (pos,vector)))
+                    hit_input_queue.put((body.polyhedron.ray, (pos,vector)))
                     '''
                     hits = body.polyhedron.ray(pos,vector)
                     if len(hits):
@@ -647,9 +795,9 @@ if __name__ == "__main__":
             if event.type == pygame.MOUSEBUTTONDOWN:
                 pass
         try:
-            hits = output_queue.get(False)
+            hits = hit_output_queue.get(False)
             if len(hits):
-                print(hits)
+                print('hits',hits)
                 force_vector = tuple(vector[i]*force for i in range(3))
                 body.apply(force_vector, hits[0][1])
             force = 0
@@ -661,16 +809,25 @@ if __name__ == "__main__":
         #pygame.draw.circle(screen, "red", (0,0), 40)
         screen.fill("black")
         crosshair.draw(pygame, screen)
-        #texture = Texture(bitmap, list(body.polyhedron.faces)[0], body.pos)
-        #texture.draw(pygame, screen)
         for edge in body.polyhedron.edges:
-            p1, p2 = tuple(edge)
-            print(p1,p2)
+            p1, p2 = tuple(body.polyhedron.verts[index] for index in edge)
+            #print(p1,p2)
             p1, p2 = camera.project(p1), camera.project(p2)
             p1 = (p1[0]*1+screen_width/2,p1[1]*-1+screen_height/2)
             p2 = (p2[0]*1+screen_width/2,p2[1]*-1+screen_height/2)
             pygame.draw.line(screen, "white", p1, p2)
-        grid.draw(pygame,screen)
+        '''
+        try:
+            dots = []
+            while True:
+                dots = texture_output_queue.get(False)
+        except queue.Empty:
+            if len(dots):
+                print('dots',dots)
+            for pos in dots:
+                pygame.draw.circle(screen, "white", pos, 1)
+        '''
+        #grid.draw(pygame,screen)
         pygame.display.flip()
         dT = clock.tick(60) / 1000
         dt = 1/framerate 
@@ -682,6 +839,7 @@ if __name__ == "__main__":
         #camera.look(body.pos)
         if space_down:
             force += dt*100
-        print("dT", dT, force)
-    process.kill()
+        #print("dT", dT, force)
+    hit_process.kill()
+    #texture_process.kill()
     pygame.quit()
